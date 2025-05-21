@@ -1,154 +1,189 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
 import re
-from typing import List, Tuple, Dict
 import yt_dlp
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import time
+import sys
+import os
+from datetime import datetime
+import logging
 
-def extract_bandcamp_links(text: str) -> List[str]:
-    """Extract Bandcamp links from text."""
-    # Regular expression for Bandcamp URLs
-    bandcamp_pattern = r'https?://[^/]*\.bandcamp\.com/[^\s<>"]+'
-    return re.findall(bandcamp_pattern, text)
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bandcamp_extractor.log'),
+        logging.StreamHandler(sys.stderr)
+    ]
+)
+logger = logging.getLogger(__name__)
 
-def is_private_video(entry: Dict) -> bool:
-    """Check if a video is private or unavailable."""
-    if not entry:
-        return True
-    title = entry.get('title', '').lower()
-    return 'private video' in title or 'unavailable' in title
-
-def process_video(ydl: yt_dlp.YoutubeDL, entry: dict, timeout: int = 30) -> List[Tuple[str, str]]:
-    """Process a single video and return any found Bandcamp links."""
-    if not entry or is_private_video(entry):
-        return []
+def extract_bandcamp_links(video_url: str):
+    """Extract Bandcamp links from a YouTube video description."""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'ignoreerrors': True,
+            'skip_download': True,
+            'socket_timeout': 30,
+            'retries': 3,
+        }
         
-    video_url = f"https://www.youtube.com/watch?v={entry['id']}"
-    title = entry.get('title', 'Unknown Title')
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            if not info:
+                return None
+            
+            description = info.get('description', '')
+            if not description:
+                return None
+            
+            # Look for Bandcamp links in the description
+            bandcamp_links = re.findall(r'https?://[^\s<>"]+?bandcamp\.com[^\s<>"]*', description)
+            if bandcamp_links:
+                return {
+                    'video_title': info.get('title', 'Unknown Title'),
+                    'video_url': video_url,
+                    'bandcamp_links': bandcamp_links
+                }
+    except Exception as e:
+        print(f"\nError processing {video_url}: {str(e)}", file=sys.stderr)
+    return None
+
+def process_playlist(playlist_url: str, output_file: str = None, max_workers: int = 4):
+    """Process a YouTube playlist and extract Bandcamp links."""
+    # Smart default for output file if none provided
+    if not output_file:
+        # Extract playlist ID or use current timestamp if not possible
+        playlist_id = re.search(r'(?:list=)([^&]+)', playlist_url)
+        if playlist_id:
+            playlist_id = playlist_id.group(1)
+            output_file = f"bandcamp_links_{playlist_id}.csv"
+        else:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_file = f"bandcamp_links_{timestamp}.csv"
+    
+    processed_count = 0
+    found_count = 0
+    error_count = 0
     
     try:
-        # Set a timeout for the video info extraction
-        start_time = time.time()
-        video_info = ydl.extract_info(video_url, download=False)
+        # Extract playlist information
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
+            'ignoreerrors': True,
+            'skip_download': True,
+            'socket_timeout': 30,
+            'retries': 3,
+        }
         
-        # Check if we've exceeded the timeout
-        if time.time() - start_time > timeout:
-            print(f"\nTimeout processing video: {title}")
-            return []
-            
-        if not video_info:
-            return []
-            
-        description = video_info.get('description', '')
-        bandcamp_links = extract_bandcamp_links(description)
-        
-        return [(title, link) for link in bandcamp_links]
-    except Exception as e:
-        if "Private video" in str(e):
-            print(f"\nSkipping private video: {title}")
-        elif "Video unavailable" in str(e):
-            print(f"\nSkipping unavailable video: {title}")
-        else:
-            print(f"\nError processing video {title}: {str(e)}")
-        return []
-
-def get_video_info(playlist_url: str, timeout: int = 30) -> List[Tuple[str, str]]:
-    """Get video information from a YouTube playlist using parallel processing."""
-    ydl_opts = {
-        'quiet': True,
-        'extract_flat': True,
-        'force_generic_extractor': False,
-        'ignoreerrors': True,
-        'no_warnings': True,
-        'socket_timeout': timeout,
-        'retries': 3  # Add retries for failed requests
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            print("Fetching playlist information...")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            logger.info("Fetching playlist information...")
             playlist_info = ydl.extract_info(playlist_url, download=False)
             if not playlist_info:
-                raise Exception("Could not extract playlist information")
+                logger.error("Could not extract playlist information")
+                return
             
-            # Filter out private videos before processing
-            entries = [entry for entry in playlist_info['entries'] if not is_private_video(entry)]
-            total_videos = len(entries)
+            videos = playlist_info.get('entries', [])
+            if not videos:
+                logger.warning("No videos found in playlist")
+                return
             
-            if total_videos == 0:
-                print("No accessible videos found in playlist")
-                return []
-                
-            print(f"Found {total_videos} accessible videos in playlist")
+            total_videos = len(videos)
+            logger.info(f"Found {total_videos} videos in playlist")
             
-            results = []
-            # Use a more conservative number of workers
-            max_workers = min(3, total_videos)  # Reduced from 5 to 3
+            # Create or append to CSV file
+            file_exists = os.path.exists(output_file)
+            mode = 'a' if file_exists else 'w'
             
-            # Process videos in smaller batches
-            batch_size = 5
+            # Process videos in parallel with smaller batches
+            batch_size = 50  # Process 50 videos at a time
+            
             for i in range(0, total_videos, batch_size):
-                batch = entries[i:i + batch_size]
-                print(f"\nProcessing batch {i//batch_size + 1}/{(total_videos + batch_size - 1)//batch_size}")
+                batch = videos[i:i + batch_size]
+                logger.info(f"Processing batch {i//batch_size + 1}/{(total_videos + batch_size - 1)//batch_size}")
                 
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(extract_bandcamp_links, video['url']): video['url'] 
+                        for video in batch
+                    }
+                    
+                    # Create progress bar for this batch
                     with tqdm(total=len(batch), desc="Processing videos") as pbar:
-                        future_to_video = {
-                            executor.submit(process_video, ydl, entry, timeout): entry 
-                            for entry in batch
-                        }
-                        
-                        for future in as_completed(future_to_video):
+                        for future in as_completed(futures):
                             try:
-                                video_results = future.result(timeout=timeout)
-                                results.extend(video_results)
-                            except TimeoutError:
-                                print("\nTask timed out, skipping...")
-                            except Exception as e:
-                                print(f"\nError in task: {str(e)}")
-                            finally:
-                                pbar.update(1)
+                                result = future.result()
+                                processed_count += 1
+                                
+                                if result:
+                                    found_count += 1
+                                    # Create DataFrame for this result
+                                    df = pd.DataFrame({
+                                        'Video Title': [result['video_title']],
+                                        'Video URL': [result['video_url']],
+                                        'Bandcamp Links': [', '.join(result['bandcamp_links'])]
+                                    })
+                                    
+                                    # Write to CSV immediately
+                                    df.to_csv(output_file, mode=mode, header=not file_exists, index=False)
+                                    file_exists = True  # After first write, we're appending
+                                    
+                                    # Log found links
+                                    logger.info(f"Found Bandcamp links in: {result['video_title']}")
+                                    for link in result['bandcamp_links']:
+                                        logger.info(f"  - {link}")
+                            except Exception:
+                                error_count += 1
+                            
+                            # Update progress bar
+                            pbar.update(1)
+                            pbar.set_postfix({
+                                'Processed': processed_count,
+                                'Found': found_count,
+                                'Errors': error_count
+                            })
                 
                 # Add a small delay between batches to avoid rate limiting
                 if i + batch_size < total_videos:
                     time.sleep(2)
             
-            return results
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return []
-
-def save_to_csv(results: List[Tuple[str, str]], output_file: str):
-    """Save results to a CSV file."""
-    df = pd.DataFrame(results, columns=['Video Title', 'Bandcamp URL'])
-    df.to_csv(output_file, index=False, quoting=csv.QUOTE_ALL)
-    print(f"\nResults saved to {output_file}")
+            logger.info(f"Processing complete.")
+            logger.info(f"Processed {processed_count} videos")
+            logger.info(f"Found Bandcamp links in {found_count} videos")
+            logger.info(f"Encountered {error_count} errors")
+            logger.info(f"Results saved to {output_file}")
+            
+    except KeyboardInterrupt:
+        logger.info("\nScript interrupted by user. Progress has been saved.")
+        logger.info(f"Processed {processed_count} videos")
+        logger.info(f"Found Bandcamp links in {found_count} videos")
+        logger.info(f"Encountered {error_count} errors")
+        logger.info(f"Results saved to {output_file}")
+    except Exception as e:
+        logger.error(f"Error processing playlist: {str(e)}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Extract Bandcamp links from YouTube playlist videos')
-    parser.add_argument('playlist_url', help='URL of the YouTube playlist')
-    parser.add_argument('--output', '-o', default='bandcamp_links.csv',
-                      help='Output CSV file name (default: bandcamp_links.csv)')
-    parser.add_argument('--workers', '-w', type=int, default=3,
-                      help='Number of worker threads (default: 3)')
-    parser.add_argument('--timeout', '-t', type=int, default=30,
-                      help='Timeout in seconds for each video (default: 30)')
+    parser = argparse.ArgumentParser(description='Extract Bandcamp links from YouTube playlist descriptions')
+    parser.add_argument('playlist_url', help='YouTube playlist URL')
+    parser.add_argument('--output', '-o', 
+                        help='Output CSV file (default: auto-generated based on playlist ID)')
+    parser.add_argument('--workers', '-w', type=int, default=4,
+                        help='Number of worker threads (default: 4)')
     
     args = parser.parse_args()
     
-    print(f"Processing playlist: {args.playlist_url}")
-    results = get_video_info(args.playlist_url, args.timeout)
-    
-    if results:
-        save_to_csv(results, args.output)
-        print(f"Found {len(results)} Bandcamp links")
-    else:
-        print("No Bandcamp links found")
+    logger.info(f"Starting extraction from playlist: {args.playlist_url}")
+    process_playlist(args.playlist_url, args.output, args.workers)
 
 if __name__ == '__main__':
-    main() 
+    main()

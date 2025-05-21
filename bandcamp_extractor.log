@@ -1,0 +1,16 @@
+2025-05-21 19:38:30,908 - INFO - Starting extraction from playlist: https://youtube.com/playlist?list=PLfDvhliJGi7jzaYGKAW4nsJR-aINTvSD4&si=2Sscos8uhfIxMzoH
+2025-05-21 19:38:30,958 - INFO - Fetching playlist information...
+2025-05-21 19:38:42,484 - INFO - Found 1712 videos in playlist
+2025-05-21 19:38:42,484 - INFO - Processing batch 1/35
+2025-05-21 19:39:48,350 - INFO - Processing batch 2/35
+2025-05-21 19:40:46,654 - INFO - Processing batch 3/35
+2025-05-21 19:41:50,580 - INFO - Processing batch 4/35
+2025-05-21 19:42:46,221 - INFO - Found Bandcamp links in: HIROSHI SATOH - Say Goodbye
+2025-05-21 19:42:46,221 - INFO -   - https://avantgarderecords.bandcamp.com/
+2025-05-21 19:42:48,224 - INFO - Processing batch 5/35
+2025-05-21 19:43:20,085 - INFO - 
+Script interrupted by user. Progress has been saved.
+2025-05-21 19:43:20,119 - INFO - Processed 226 videos
+2025-05-21 19:43:20,141 - INFO - Found Bandcamp links in 1 videos
+2025-05-21 19:43:20,141 - INFO - Encountered 0 errors
+2025-05-21 19:43:20,169 - INFO - Results saved to bandcamp_links_PLfDvhliJGi7jzaYGKAW4nsJR-aINTvSD4.csv
